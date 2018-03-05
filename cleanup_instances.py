@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import socket
 import urllib2
 from datetime import datetime, timedelta
 
@@ -9,37 +10,50 @@ from botocore.exceptions import ClientError
 ec2 = boto3.resource('ec2')
 
 
-def cleanup_images_older_than(timedelta_=timedelta(days=365)):
+def deregister_outdated_images(timedelta_=timedelta(days=365)):
     for image in ec2.images.all():
         image_creation_date = datetime.strptime(image.creation_date, '%Y-%m-%dT%H:%M:%S.000Z')
         if datetime.now() - image_creation_date > timedelta_:
             try:
                 image.deregister()
-            except ClientError as e:
+            except ClientError:
                 continue
 
 
-def terminate_stopped_instances():
+def get_ip_by_dns_name(dns):
+    return socket.gethostbyname(dns)
+
+
+def find_instances_by_ip_and_terminate_if_needed(ip, dns):
     instances = []
-    for instance in ec2.instances.all():
+    filters = [{'Name': 'ip-address', 'Values': [ip]}]
+    query_result = list(ec2.instances.filter(Filters=filters).limit(1))
+
+    if not query_result:
+        instances.append({
+            'name': 'not found',
+            'image_id': 'not found',
+            'public_dns_name': dns,
+            'status': 'unknown',
+            'dns_health': dns_health_check_status(dns)
+        })
+        return instances
+
+    for instance in query_result:
         instance_state_name = instance.state['Name']
-        health_check_status = dns_health_check_status(instance.public_dns_name)
+        health_check_status = dns_health_check_status(dns)
 
-        if instance_state_name == 'stopped':
-            image_created = create_image(instance)
-            if image_created:
-                terminate(instance)
-                instance_state_name = 'terminated'
+        if instance_state_name == 'stopped' and try_create_image(instance):
+            terminate(instance)
+            instance_state_name = 'terminated'
 
-        instances.append(
-            {
-                'name': instance.instance_id,
-                'image_id': instance.image_id,
-                'public_dns_name': instance.public_dns_name,
-                'status': instance_state_name,
-                'dns_health': health_check_status
-            }
-        )
+        instances.append({
+            'name': instance.instance_id,
+            'image_id': instance.image_id,
+            'public_dns_name': dns,
+            'status': instance_state_name,
+            'dns_health': health_check_status
+        })
 
     return instances
 
@@ -51,19 +65,18 @@ def dns_health_check_status(dns_name):
     try:
         request = urllib2.Request('http://' + dns_name)
         urllib2.urlopen(request)
-
     except urllib2.HTTPError as e:
         if e.code != 500:
             return 'ok'
         else:
             return 'http error'
-    except urllib2.URLError as e:
+    except urllib2.URLError:
         return 'connection error'
     else:
         return 'ok'
 
 
-def create_image(instance):
+def try_create_image(instance):
     try:
         image = instance.create_image(
             InstanceId=instance.instance_id,
@@ -79,7 +92,7 @@ def create_image(instance):
             ]
         )
         return True
-    except ClientError as e:
+    except ClientError:
         return False
 
 
@@ -88,36 +101,39 @@ def terminate(instance):
     instance.wait_until_terminated()
 
 
-def print_instances(instances):
-    for instance in instances:
-        name_ = instance['name']
-        image_id_ = instance['image_id']
-        dns_name_ = instance['public_dns_name']
-        status_ = instance['status']
+def print_instance(instance):
+    name_ = instance['name']
+    image_id_ = instance['image_id']
+    dns_name_ = instance['public_dns_name']
+    status_ = instance['status']
 
-        if status_ == 'running':
-            status_ = '\033[1;42m' + status_ + '\033[1;m'
-        elif status_ == 'terminated':
-            status_ = '\033[1;41m' + status_ + '\033[1;m'
-        else:
-            status_ = '\033[1;43m' + status_ + '\033[1;m'
+    if status_ == 'running':
+        status_ = '\033[1;42m' + status_ + '\033[1;m'
+    elif status_ == 'terminated':
+        status_ = '\033[1;41m' + status_ + '\033[1;m'
+    else:
+        status_ = '\033[1;43m' + status_ + '\033[1;m'
 
-        health_ = instance['dns_health']
+    health_ = instance['dns_health']
 
-        if health_ == 'ok':
-            health_ = '\033[1;42m' + health_ + '\033[1;m'
-        elif health_ == 'no dns name':
-            health_ = '\033[1;43m' + health_ + '\033[1;m'
-        else:
-            health_ = '\033[1;41m' + health_ + '\033[1;m'
+    if health_ == 'ok':
+        health_ = '\033[1;42m' + health_ + '\033[1;m'
+    elif health_ == 'no dns name':
+        health_ = '\033[1;43m' + health_ + '\033[1;m'
+    else:
+        health_ = '\033[1;41m' + health_ + '\033[1;m'
 
-        print name_, \
-            image_id_, \
-            dns_name_, \
-            status_, \
-            health_
+    print name_, image_id_, dns_name_, status_, health_
 
 
-instance_list = terminate_stopped_instances()
-cleanup_images_older_than(timedelta(days=7))
-print_instances(instance_list)
+# hue hue hue
+deregister_outdated_images(timedelta(days=7))
+
+ip_and_dns = [(get_ip_by_dns_name(d.strip()), d.strip()) for d in open('domain.list', 'r')]
+
+instance_list = []
+for t in ip_and_dns:
+    res = find_instances_by_ip_and_terminate_if_needed(t[0], t[1])
+    instance_list.extend(res)
+
+[print_instance(i) for i in instance_list]
