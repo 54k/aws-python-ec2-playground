@@ -9,14 +9,14 @@ from botocore.exceptions import ClientError
 ec2 = boto3.resource('ec2')
 
 
-def deregister_images_older_than_days(days):
+def cleanup_images_older_than(timedelta_=timedelta(days=365)):
     for image in ec2.images.all():
         image_creation_date = datetime.strptime(image.creation_date, '%Y-%m-%dT%H:%M:%S.000Z')
-        if datetime.now() - image_creation_date > timedelta(days=days):
+        if datetime.now() - image_creation_date > timedelta_:
             try:
                 image.deregister()
             except ClientError as e:
-                return
+                continue
 
 
 def terminate_stopped_instances():
@@ -26,9 +26,10 @@ def terminate_stopped_instances():
         health_check_status = dns_health_check_status(instance.public_dns_name)
 
         if instance_state_name == 'stopped':
-            create_image(instance)
-            terminate(instance)
-            instance_state_name = 'terminated'
+            image_created = create_image(instance)
+            if image_created:
+                terminate(instance)
+                instance_state_name = 'terminated'
 
         instances.append(
             {
@@ -77,8 +78,9 @@ def create_image(instance):
                 image_tag
             ]
         )
+        return True
     except ClientError as e:
-        return
+        return False
 
 
 def terminate(instance):
@@ -116,5 +118,6 @@ def print_instances(instances):
             health_
 
 
-deregister_images_older_than_days(7)
-print_instances(terminate_stopped_instances())
+instance_list = terminate_stopped_instances()
+cleanup_images_older_than(timedelta(days=7))
+print_instances(instance_list)
