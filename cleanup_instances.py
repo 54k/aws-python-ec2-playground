@@ -11,7 +11,7 @@ ec2 = boto3.resource('ec2')
 
 
 def deregister_outdated_images(timedelta_=timedelta(days=365)):
-    for image in ec2.images.all():
+    for image in ec2.images.filter(Owners=['self']):
         image_creation_date = datetime.strptime(image.creation_date, '%Y-%m-%dT%H:%M:%S.000Z')
         if datetime.now() - image_creation_date > timedelta_:
             try:
@@ -27,7 +27,7 @@ def get_ip_by_dns_name(dns):
 def find_instances_by_ip_and_terminate_if_needed(ip, dns):
     instances = []
     filters = [{'Name': 'ip-address', 'Values': [ip]}]
-    query_result = list(ec2.instances.filter(Filters=filters).limit(1))
+    query_result = list(ec2.instances.filter(Filters=filters))
 
     if not query_result:
         instances.append({
@@ -129,10 +129,8 @@ def print_instance(instance):
 # hue hue hue
 deregister_outdated_images(timedelta(days=7))
 
-ip_and_dns = [(get_ip_by_dns_name(d.strip()), d.strip()) for d in open('domain.list', 'r')]
-
 instance_list = []
-for t in ip_and_dns:
+for t in [(get_ip_by_dns_name(d.strip()), d.strip()) for d in open('domain.list', 'r')]:
     res = find_instances_by_ip_and_terminate_if_needed(t[0], t[1])
     instance_list.extend(res)
 
